@@ -1,11 +1,13 @@
 import { bytesToHex, decodeEventLog, hexToBytes, type Abi, type Hex } from 'viem';
+import type { PolkadotClient } from 'polkadot-api';
+import { decAnyMetadata, unifyMetadata } from '@polkadot-api/substrate-bindings';
 import { createChainClient } from '@parity/product-sdk-chain-client';
 import { devnet_asset_hub } from '@parity/product-sdk-descriptors/devnet-asset-hub';
 import { QUERY_FALLBACK_ORIGIN, createContractFromClient, createContractRuntimeFromClient, isContractAccountMapped, ensureContractAccountMapped, type AbiEntry, type ContractRuntime } from '@parity/product-sdk-contracts';
 import { SignerManager } from '@parity/product-sdk-signer';
 import { formatHostError, getAccountsProvider, isInsideContainer, requestResourceAllocation, type RingLocation } from '@parity/product-sdk-host';
 import abi from './faucet.abi.json';
-import { ASSET_HUB_GENESIS, PEOPLE_GENESIS, SKIP_REASONS, bytesEqual, chainInfo, claimBlocker, encodeProof, planPayouts, type Destination, type FaucetHost, type FaucetService, type Payout, type Skipped, type Snapshot, type TierConfig } from './model';
+import { ASSET_HUB_GENESIS, PEOPLE_GENESIS, SKIP_REASONS, bytesEqual, chainInfo, claimBlocker, encodeProof, pgasPipeline, planPayouts, type Destination, type FaucetHost, type FaucetService, type Payout, type Pipelines, type Skipped, type Snapshot, type TierConfig } from './model';
 
 const SIGN_IN = 'Sign in to this Polkadot host with your Polkadot app, then connect again.';
 /** How long a chain read may take. */
@@ -67,9 +69,15 @@ export function claimOutcome(events: unknown[], address: Hex): { paid: Payout[];
   }
   return { paid, skipped };
 }
+/** The transaction-extension pipelines Asset Hub declares at its finalized block. */
+async function assetHubPipelines(client: PolkadotClient): Promise<Pipelines> {
+  const { hash } = await client.getFinalizedBlock();
+  return unifyMetadata(decAnyMetadata(await client.getMetadata(hash))).extrinsic.extensionsByVersion;
+}
 const defaultDependencies = {
   createChainClient, SignerManager, isInsideContainer, getAccountsProvider, createContractFromClient,
   createContractRuntimeFromClient, isContractAccountMapped, ensureContractAccountMapped, requestResourceAllocation,
+  assetHubPipelines,
 };
 export type FaucetDependencies = typeof defaultDependencies;
 
@@ -96,6 +104,7 @@ function openClient(create: FaucetDependencies['createChainClient']) {
 /** What the faucet, open to anyone, shares with a signed-in account's claims. */
 interface Reader {
   address: Hex;
+  accounts: NonNullable<Awaited<ReturnType<typeof getAccountsProvider>>>;
   productId: string;
   /** The personhood product that holds People and People Lite keys. */
   personhood: string;
@@ -129,7 +138,7 @@ export async function openFaucet(address: Hex, productId: string, dependencies: 
       throw new Error('This frontend requires the paseo-faucet:v2 contract. Update the ABI and integration for another version.');
     }
     const reader: Reader = {
-      address, productId, client, query,
+      address, accounts, productId, client, query,
       // The TLD belongs to the network, so the personhood product shares this product's.
       personhood: `peopl.${productId.slice(productId.lastIndexOf('.') + 1)}`,
       runtime: createContractRuntimeFromClient(client.raw.assetHub, devnet_asset_hub),
@@ -177,8 +186,8 @@ export async function openFaucet(address: Hex, productId: string, dependencies: 
  * for the first claim.
  */
 async function connectAccount(reader: Reader, dependencies: FaucetDependencies): Promise<FaucetService | null> {
-  const { address, productId, personhood, client, runtime, query, refresh } = reader;
-  const { SignerManager, createContractFromClient, isContractAccountMapped, ensureContractAccountMapped, requestResourceAllocation } = dependencies;
+  const { address, accounts, productId, personhood, client, runtime, query, refresh } = reader;
+  const { SignerManager, createContractFromClient, isContractAccountMapped, ensureContractAccountMapped, requestResourceAllocation, assetHubPipelines } = dependencies;
   const signerManager = new SignerManager({ dappName: productId, ss58Prefix: 0 });
   try {
     const connected = await within(signerManager.connect(), APPROVAL_TIMEOUT_MS, 'Connecting to the Polkadot host');
@@ -189,7 +198,6 @@ async function connectAccount(reader: Reader, dependencies: FaucetDependencies):
       throw account.error;
     }
     const productAccount = account.value;
-    const signer = productAccount.getSigner();
     async function ensureFees() {
       // Public Paseo PGAS uses 10 decimal places. Keep a conservative 1-PGAS
       // fee/deposit buffer, rather than consuming a host allocation per click.
@@ -197,11 +205,14 @@ async function connectAccount(reader: Reader, dependencies: FaucetDependencies):
       if ((gas?.balance ?? 0n) < 10_000_000_000n) await allocateFees(requestResourceAllocation);
     }
     let mapped = false;
+    /** Fees and the one-time mapping; returns a signer on the pipeline whose fee PGAS pays, read at each claim. */
     async function prepareAccount(progress: (message: string) => void) {
-      // Bootstrap fees before asking a new, zero-PAS account to sign its mapping.
       progress('Preparing transaction fees');
+      const pipelines = await within(assetHubPipelines(client.raw.assetHub), READ_TIMEOUT_MS, 'Preparing transaction fees');
+      const signer = accounts.getProductAccountSigner({ dotNsIdentifier: productId, derivationIndex: 0, publicKey: productAccount.publicKey }, { txExtVersion: pgasPipeline(pipelines) });
+      // Bootstrap fees before asking a new, zero-PAS account to sign its mapping.
       await ensureFees();
-      if (mapped) return;
+      if (mapped) return signer;
       const check = await within(isContractAccountMapped(runtime, productAccount.address), READ_TIMEOUT_MS, 'Preparing transaction fees');
       if (!check.ok) throw check.error;
       if (!check.value) {
@@ -212,9 +223,10 @@ async function connectAccount(reader: Reader, dependencies: FaucetDependencies):
         await ensureFees();
       }
       mapped = true;
+      return signer;
     }
     const faucet = createContractFromClient(client.raw.assetHub, devnet_asset_hub, address, abi as AbiEntry[], {
-      defaultOrigin: productAccount.address, defaultSigner: signer,
+      defaultOrigin: productAccount.address,
     });
     const listed = await within(signerManager.listRingVrfKeys(personhood), APPROVAL_TIMEOUT_MS, 'Reading your personhood keys');
     const heldKeys = listed.ok ? listed.value : [];
@@ -250,7 +262,7 @@ async function connectAccount(reader: Reader, dependencies: FaucetDependencies):
         claiming = true;
         try {
           // Resource allocation must precede the first contract transaction for a zero-PAS signer.
-          await prepareAccount(progress);
+          const signer = await prepareAccount(progress);
           const keys = await within(signerManager.listRingVrfKeys(personhood), APPROVAL_TIMEOUT_MS, 'Reading your personhood keys');
           if (!keys.ok) throw keyRefusal(keys.error);
           // Retry proof preparation only. Never automatically resubmit an uncertain signed transaction.

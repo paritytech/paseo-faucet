@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { chainInfo, claimBlocker, encodeProof, formatAmount, isEthereumDerived, netPas, parseRecipient, planPayouts, type Destination, type Snapshot } from '../src/model';
+import { chainInfo, claimBlocker, encodeProof, formatAmount, isEthereumDerived, netPas, parseRecipient, pgasPipeline, planPayouts, type Destination, type Pipelines, type Snapshot } from '../src/model';
 
 const alice = '5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY';
 const ethereum = '0x1234567890123456789012345678901234567890';
@@ -74,4 +74,19 @@ test('UI eligibility is advisory and blocks paused, disabled, capped, closed and
   assert.match(claimBlocker({ ...state, pasBalance: 0n }, enabled)!, /refill/);
   assert.match(claimBlocker(state, { ...enabled, pas: 1n })!, /minimum/);
   assert.equal(claimBlocker({ ...state, pusdBalance: 0n }, enabled), null);
+});
+const pipeline = (...identifiers: string[]) => identifiers.map((identifier) => ({ identifier }));
+/** Paseo Asset Hub runtime 2005006: version 0 is the plain account pipeline, version 1 adds the PGAS and person ones. */
+const plain = ['AuthorizeCall', 'CheckNonZeroSender', 'CheckSpecVersion', 'CheckTxVersion', 'CheckGenesis', 'CheckMortality', 'CheckNonce', 'CheckWeight', 'ChargeAssetTxPayment', 'PrevalidateAttests', 'CheckMetadataHash', 'EthSetOrigin', 'StorageWeightReclaim'];
+const assetHub2005006: Pipelines = {
+  0: pipeline(...plain),
+  1: pipeline('UnitTransactionExtension', 'VerifyMultiSignature', 'AsScarcity', 'AuthorizeCall', 'AsPgas', 'AsDotnsGateway', 'RestrictOrigins', ...plain.slice(1)),
+};
+test('a claim signs on the pipeline that pays its fee in PGAS', () => {
+  assert.equal(pgasPipeline(assetHub2005006), 1);
+  assert.equal(pgasPipeline({ 2: assetHub2005006[1], 0: assetHub2005006[0], 1: assetHub2005006[1] }), 1);
+});
+test('a runtime with a single pipeline signs on it when it pays in PGAS, and fails clearly when not', () => {
+  assert.equal(pgasPipeline({ 0: pipeline(...plain, 'AsPgas') }), 0);
+  assert.throws(() => pgasPipeline({ 0: pipeline(...plain) }), /^Error: Asset Hub declares no transaction pipeline that pays fees in PGAS/);
 });

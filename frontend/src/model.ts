@@ -133,6 +133,18 @@ export function claimBlocker(state: Snapshot, tier: TierConfig): string | null {
   return 'The faucet needs a refill. Please try again later.';
 }
 
+/** A chain's transaction-extension pipelines by version, as metadata declares them. */
+export type Pipelines = Record<number, ReadonlyArray<{ identifier: string }>>;
+/**
+ * The lowest pipeline whose fee a product account can pay in PGAS. Its PGAS fee wrapper keeps the identifier of the
+ * payment extension it wraps, so the pipeline is found by `AsPgas`, which Asset Hub declares alongside it.
+ */
+export function pgasPipeline(pipelines: Pipelines): number {
+  const version = Object.keys(pipelines).map(Number).sort((a, b) => a - b)
+    .find((v) => pipelines[v].some(({ identifier }) => identifier === 'AsPgas'));
+  if (version === undefined) throw new Error('Asset Hub declares no transaction pipeline that pays fees in PGAS, so the faucet cannot submit a claim.');
+  return version;
+}
 export function bytesEqual(a: Uint8Array, hex: Hex): boolean {
   const b = hexToBytes(hex);
   return a.length === b.length && a.every((value, i) => value === b[i]);

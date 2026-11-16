@@ -810,7 +810,9 @@ The product reads the contract and builds one `drip` call:
 - Cross-check `contextFor(epoch)` against the context the host used, and refuse to continue
   on a mismatch: the product must be served from `productId()`.
 - Submit as a Substrate-signed `Revive.call` from the product account, value 0, with fees in
-  PGAS. Dry-run it with `ReviveApi.call` first.
+  PGAS. Dry-run it with `ReviveApi.call` first. Only one of Asset Hub's transaction-extension
+  pipelines charges the fee in PGAS: sign on the lowest version whose metadata declares
+  `AsPgas` (version 1 on runtime 2005006), as the host signers default to version 0.
 - A proof is valid for one epoch and while Asset Hub holds its ring revision. On
   `InvalidProof`, build a fresh proof and retry once.
 - Show the net amount per destination: on Asset Hub the tier's PAS; elsewhere that less the

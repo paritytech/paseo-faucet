@@ -3,13 +3,19 @@ import assert from 'node:assert/strict';
 import { bytesToHex, encodeAbiParameters, encodeEventTopics, hexToBytes, type Abi, type Hex } from 'viem';
 import abi from '../src/faucet.abi.json';
 import { openFaucet, type FaucetDependencies } from '../src/service';
-import { PEOPLE_GENESIS, type FaucetHost } from '../src/model';
+import { PEOPLE_GENESIS, type FaucetHost, type Pipelines } from '../src/model';
 
 const contract = '0x1234567890123456789012345678901234567890';
 const recipient = `0x${'33'.repeat(32)}` as Hex;
 const context = `0x${'11'.repeat(32)}` as Hex;
 const alias = `0x${'22'.repeat(32)}` as Hex;
 const membershipMessage = new TextEncoder().encode('paseo-faucet: membership check');
+const productKey = new Uint8Array(32).fill(0x44);
+/** Paseo Asset Hub's two pipelines, trimmed to what tells them apart: only version 1 pays fees in PGAS. */
+const assetHubPipelines: Pipelines = {
+  0: [{ identifier: 'CheckNonce' }, { identifier: 'ChargeAssetTxPayment' }],
+  1: [{ identifier: 'VerifyMultiSignature' }, { identifier: 'AsPgas' }, { identifier: 'CheckNonce' }, { identifier: 'ChargeAssetTxPayment' }],
+};
 /** A host refusal as the signer returns it: the message, and the host's own tagged error as the cause. */
 const hostError = (tag: string) => new Error(`Host rejected the request: Domain → V1 → ${tag}`, { cause: { tag: 'Domain', value: { tag: 'V1', value: { tag } } } });
 /** A `Revive.ContractEmitted` event as papi decodes it, carrying the faucet's ABI-encoded log. */
@@ -20,7 +26,7 @@ function emitted(eventName: 'Dripped' | 'DripSkipped', destinationId: number, va
     : encodeAbiParameters([{ type: 'uint8' }, { type: 'bytes32' }, { type: 'uint8' }], [2, alias, Number(values[0])]);
   return { type: 'Revive', value: { type: 'ContractEmitted', value: { contract: from, data: hexToBytes(data), topics } } };
 }
-function setup(options: { heldKeys?: string[]; listDenied?: boolean; claimed?: number[]; contextMismatch?: boolean; fullNotMember?: boolean | 'atClaim'; firstProofError?: string; permissionDenied?: boolean; failTx?: boolean; failDryOnce?: boolean; mapped?: boolean; pgasBalance?: bigint; productAccountError?: Error; outside?: boolean; bareRings?: boolean; login?: { response?: string; error?: unknown }; stuckAllocation?: boolean; pgasResponse?: string } = {}) {
+function setup(options: { heldKeys?: string[]; listDenied?: boolean; claimed?: number[]; contextMismatch?: boolean; fullNotMember?: boolean | 'atClaim'; firstProofError?: string; permissionDenied?: boolean; failTx?: boolean; failDryOnce?: boolean; mapped?: boolean; pgasBalance?: bigint; productAccountError?: Error; outside?: boolean; bareRings?: boolean; login?: { response?: string; error?: unknown }; stuckAllocation?: boolean; pgasResponse?: string; pipelines?: Pipelines } = {}) {
   const calls: string[] = [];
   const owners: string[] = [];
   const probes: string[] = [];
@@ -29,6 +35,8 @@ function setup(options: { heldKeys?: string[]; listDenied?: boolean; claimed?: n
   let transactionArgs: unknown[] = [];
   let messageArgs: unknown[] = [];
   let loginReason: string | undefined;
+  const signers: { account: unknown; options: unknown }[] = [];
+  let mapSigner: unknown;
   const ring = (lite: boolean) => ({ chainId: PEOPLE_GENESIS, junctions: [
     ...options.bareRings ? [] : [{ tag: 'PalletInstance', value: 67 }],
     { tag: 'CollectionId', value: bytesToHex(new TextEncoder().encode((lite ? 'pop:polkadot.network/people-lite' : 'pop:polkadot.network/people').padEnd(32, ' '))) },
@@ -37,7 +45,7 @@ function setup(options: { heldKeys?: string[]; listDenied?: boolean; claimed?: n
     async connect() { calls.push('connect'); return { ok: true, value: [] }; }
     async getProductAccount() {
       if (options.productAccountError) return { ok: false, error: options.productAccountError };
-      return { ok: true, value: { address: 'product-account', getSigner: () => 'product-signer' } };
+      return { ok: true, value: { address: 'product-account', publicKey: productKey, getSigner: () => 'default-signer' } };
     }
     async listRingVrfKeys(owner: string) {
       owners.push(owner);
@@ -62,6 +70,10 @@ function setup(options: { heldKeys?: string[]; listDenied?: boolean; claimed?: n
     requestLogin(reason?: string) {
       loginReason = reason;
       return { match: async (ok: (response: string) => unknown, err: (error: unknown) => unknown) => options.login?.error ? err(options.login.error) : ok(options.login?.response ?? 'Success') };
+    },
+    getProductAccountSigner(account: unknown, options: { txExtVersion: number }) {
+      signers.push({ account, options });
+      return `product-signer@v${options.txExtVersion}`;
     },
     subscribeAccountConnectionStatus(callback: (status: string) => void) {
       statusListeners.add(callback);
@@ -115,12 +127,13 @@ function setup(options: { heldKeys?: string[]; listDenied?: boolean; claimed?: n
     SignerManager: Manager,
     createContractRuntimeFromClient: () => ({}),
     isContractAccountMapped: async () => ({ ok: true, value: options.mapped !== false }),
-    ensureContractAccountMapped: async () => { calls.push('map'); return { ok: true }; },
+    ensureContractAccountMapped: async (_runtime: unknown, _address: unknown, signer: unknown) => { calls.push('map'); mapSigner = signer; return { ok: true }; },
     createContractFromClient: (_client: unknown, _descriptor: unknown, _address: unknown, _abi: unknown, defaults: { defaultOrigin?: string }) => { origins.push(defaults.defaultOrigin); return faucet; },
+    assetHubPipelines: async () => options.pipelines ?? assetHubPipelines,
     requestResourceAllocation: async () => { calls.push('pgas'); return options.stuckAllocation ? new Promise(() => {}) : { ok: true, value: [options.pgasResponse ?? 'Allocated'] }; },
   } as unknown as FaucetDependencies;
   return {
-    dependencies, calls, owners, probes, origins, statusListeners,
+    dependencies, calls, owners, probes, origins, statusListeners, signers, get mapSigner() { return mapSigner; },
     get counts() { return { proofs, txs, drys }; }, get transactionArgs() { return transactionArgs; }, get messageArgs() { return messageArgs; }, get loginReason() { return loginReason; },
   };
 }
@@ -148,7 +161,8 @@ test('claim forwards the v2 ABI, SCALE proof and product signer, and reports wha
   assert.equal((args[2] as string).slice(0, 6), '0x450c');
   assert.equal(args[3], alias); assert.equal(args[4], 3); assert.equal(args[5], 57);
   const { onStatus, ...submit } = args[6] as { onStatus: (status: string) => void };
-  assert.deepEqual(submit, { signer: 'product-signer', waitFor: 'finalized' });
+  assert.deepEqual(submit, { signer: 'product-signer@v1', waitFor: 'finalized' });
+  assert.deepEqual(mock.signers, [{ account: { dotNsIdentifier: 'faucet.dot', derivationIndex: 0, publicKey: productKey }, options: { txExtVersion: 1 } }]);
   onStatus('broadcasting'); onStatus('in-block');
   assert.deepEqual(progress.slice(-2), ['Submitting the claim', 'Waiting for finality']);
   assert.deepEqual(receipt, {
@@ -245,11 +259,23 @@ test('connecting asks for no fees or mapping; a new account gets fees, then its 
   await faucet.claim(recipient, (message) => progress.push(message));
   assert.deepEqual(mock.calls.slice(2), ['pgas', 'map', 'pgas', 'proof', 'dry', 'tx']);
   assert.ok(progress.includes('Confirm the one-time account setup in your Polkadot app'));
+  assert.equal(mock.mapSigner, 'product-signer@v1');
 });
 test('accounts with enough PGAS do not consume another host allocation', async () => {
   const mock = setup({ pgasBalance: 30_000_000_000n });
   await (await connect(mock)).claim(recipient, () => {});
   assert.deepEqual(mock.calls.slice(2), ['proof', 'dry', 'tx']);
+});
+test('a runtime whose single pipeline pays fees in PGAS signs the claim on it', async () => {
+  const mock = setup({ pipelines: { 0: [{ identifier: 'AsPgas' }, { identifier: 'CheckNonce' }] } });
+  await (await connect(mock)).claim(recipient, () => {});
+  assert.equal((mock.transactionArgs[6] as { signer: string }).signer, 'product-signer@v0');
+});
+test('a runtime with no PGAS fee pipeline stops the claim before fees, proofs or signing', async () => {
+  const mock = setup({ mapped: false, pipelines: { 0: [{ identifier: 'CheckNonce' }, { identifier: 'ChargeAssetTxPayment' }] } });
+  await assert.rejects((await connect(mock)).claim(recipient, () => {}), /^Error: Asset Hub declares no transaction pipeline that pays fees in PGAS/);
+  assert.deepEqual(mock.calls.slice(2), []);
+  assert.deepEqual(mock.counts, { proofs: 0, txs: 0, drys: 0 });
 });
 test('a declined PGAS request stops the claim and says so', async () => {
   const mock = setup({ pgasResponse: 'Rejected' });
