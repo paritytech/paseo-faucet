@@ -1,13 +1,29 @@
 name: Configure contract
 
-# Brings the deployed faucet's destinations in line with `launch()` in contracts/script/Deploy.s.sol,
-# signed by the operator account, the faucet's owner. forge simulates
-# contracts/script/Configure.s.sol as the account's Ethereum address, which plans a
-# `setDestination` for each launch entry the faucet lacks or holds differently, and
+# Brings the deployed faucet in line with its settings, signed by the operator account, the
+# faucet's owner. `destinations` follows `launch()` in contracts/script/Deploy.s.sol through
+# contracts/script/Configure.s.sol; `claims` follows the environment's MAX_CLAIMS_PER_EPOCH and
+# CLAIM_ASSETS through contracts/script/ConfigureClaims.s.sol. forge simulates the script as the
+# account's Ethereum address, which plans a call for each setting the faucet holds differently, and
 # deploy/contract.ts sends those calls as Substrate extrinsics. A faucet already in line gets no
 # transaction. Otherwise the run simulates again and fails unless nothing is left to change.
 on:
   workflow_dispatch:
+    inputs:
+      environment:
+        description: GitHub environment that holds the instance's settings
+        type: choice
+        options:
+          - paseo
+          - paseo-getcash
+        default: paseo
+      settings:
+        description: Which settings to bring in line
+        type: choice
+        options:
+          - destinations
+          - claims
+        default: destinations
 
 permissions:
   contents: read
@@ -20,19 +36,23 @@ concurrency:
 
 env:
   ETH_RPC: https://eth-rpc-testnet.polkadot.io
-  PLAN: broadcast/Configure.s.sol/420420417/dry-run/run-latest.json
+  SCRIPT: ${{ inputs.settings == 'claims' && 'ConfigureClaims' || 'Configure' }}
 
 jobs:
   configure:
     name: Configure
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    environment: paseo
+    environment: ${{ inputs.environment }}
     defaults:
       run:
         working-directory: contracts
     env:
       FAUCET_ADDRESS: ${{ vars.FAUCET_ADDRESS }}
+      MAX_CLAIMS_PER_EPOCH: ${{ vars.MAX_CLAIMS_PER_EPOCH }}
+      CLAIM_ASSETS: ${{ vars.CLAIM_ASSETS }}
+      TARGET: ${{ inputs.environment }}
+      SETTINGS: ${{ inputs.settings }}
     steps:
       - name: Require main
         working-directory: .
@@ -61,14 +81,19 @@ jobs:
         env:
           MNEMONIC: ${{ secrets.MNEMONIC }}
         run: |
+          required="FAUCET_ADDRESS MNEMONIC"
+          if [ "$SETTINGS" = claims ]; then
+            required="$required MAX_CLAIMS_PER_EPOCH CLAIM_ASSETS"
+          fi
           missing=""
-          for name in FAUCET_ADDRESS MNEMONIC; do
+          for name in $required; do
             [ -n "${!name}" ] || missing="$missing $name"
           done
           if [ -n "$missing" ]; then
-            echo "::error::set these on the paseo environment:$missing"
+            echo "::error::set these on the $TARGET environment:$missing"
             exit 1
           fi
+          echo "PLAN=broadcast/$SCRIPT.s.sol/420420417/dry-run/run-latest.json" >> "$GITHUB_ENV"
 
       - name: Install the deploy tooling
         working-directory: deploy
@@ -82,16 +107,16 @@ jobs:
         run: npx tsx contract.ts sender
 
       # forge writes no plan when the script sends nothing, so the script's return value says how
-      # many destinations differ.
+      # many settings differ.
       - name: Simulate
         id: simulate
         env:
           SENDER: ${{ steps.sender.outputs.sender }}
         run: |
-          forge script script/Configure.s.sol:Configure --rpc-url "$ETH_RPC" --sender "$SENDER" --json > "$RUNNER_TEMP/simulate.json"
+          forge script "script/$SCRIPT.s.sol:$SCRIPT" --rpc-url "$ETH_RPC" --sender "$SENDER" --json > "$RUNNER_TEMP/simulate.json"
           changed=$(jq -er 'select(.returns) | .returns.changed.value' "$RUNNER_TEMP/simulate.json")
           echo "changed=$changed" >> "$GITHUB_OUTPUT"
-          echo "::notice::$changed destinations differ from launch()"
+          echo "::notice::$changed $SETTINGS settings differ"
 
       # The simulated plan only: forge's cache/ holds the RPC configuration and stays on the runner.
       - if: steps.simulate.outputs.changed != '0'
@@ -118,9 +143,9 @@ jobs:
           BLOCK: ${{ steps.configure.outputs.block }}
         run: |
           until [ "$(cast block-number --rpc-url "$ETH_RPC")" -ge "$BLOCK" ]; do sleep 6; done
-          forge script script/Configure.s.sol:Configure --rpc-url "$ETH_RPC" --sender "$SENDER" --json > "$RUNNER_TEMP/check.json"
+          forge script "script/$SCRIPT.s.sol:$SCRIPT" --rpc-url "$ETH_RPC" --sender "$SENDER" --json > "$RUNNER_TEMP/check.json"
           left=$(jq -er 'select(.returns) | .returns.changed.value' "$RUNNER_TEMP/check.json")
           if [ "$left" != 0 ]; then
-            echo "::error::$left destinations still differ from launch()"
+            echo "::error::$left $SETTINGS settings still differ"
             exit 1
           fi

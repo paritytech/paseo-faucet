@@ -4,10 +4,18 @@ name: Deploy contract
 # root account of MNEMONIC, which has no Ethereum key. forge simulates
 # contracts/script/Deploy.s.sol as the account's Ethereum address, and deploy/contract.ts sends the
 # simulated transactions as Substrate extrinsics. The source is then verified on Blockscout and the
-# commit is tagged `contract/<YYYY-MM-DD>.<n>` with the address. The settings are the `paseo`
-# environment's variables.
+# commit is tagged `contract/<YYYY-MM-DD>.<n>` with the address. The settings are the chosen
+# environment's variables: `paseo` for faucet.dot, or another environment for a further instance.
 on:
   workflow_dispatch:
+    inputs:
+      environment:
+        description: GitHub environment that holds the instance's settings
+        type: choice
+        options:
+          - paseo
+          - paseo-getcash
+        default: paseo
 
 permissions:
   contents: read
@@ -26,7 +34,7 @@ jobs:
     name: Deploy
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    environment: paseo
+    environment: ${{ inputs.environment }}
     outputs:
       faucet: ${{ steps.deploy.outputs.faucet }}
     defaults:
@@ -42,6 +50,7 @@ jobs:
       FULL_PUSD: ${{ vars.FULL_PUSD }}
       OWNER: ${{ vars.OWNER }}
       PAUSER: ${{ vars.PAUSER }}
+      TARGET: ${{ inputs.environment }}
     steps:
       - name: Require main
         working-directory: .
@@ -75,7 +84,7 @@ jobs:
             [ -n "${!name}" ] || missing="$missing $name"
           done
           if [ -n "$missing" ]; then
-            echo "::error::set these on the paseo environment:$missing"
+            echo "::error::set these on the $TARGET environment:$missing"
             exit 1
           fi
 
@@ -135,8 +144,13 @@ jobs:
             if [ "${OWNER,,}" != "${SENDER,,}" ]; then
               echo "1. \`$OWNER\` accepts ownership: \`acceptOwnership()\` on \`$FAUCET\`."
             fi
-            echo "1. Set \`FAUCET_ADDRESS\` on the \`paseo\` environment to \`$FAUCET\`, then run **Deploy app**."
-            echo "1. Fund the faucet with PAS and pUSD."
+            echo "1. Set \`FAUCET_ADDRESS\` on the \`$TARGET\` environment to \`$FAUCET\`."
+            if [ "$TARGET" = paseo ]; then
+              echo "1. Run **Deploy app**."
+            else
+              echo "1. Run **Configure contract** with \`claims\` on \`$TARGET\`."
+            fi
+            echo "1. Fund the faucet."
           } >> "$GITHUB_STEP_SUMMARY"
 
       # The contract is live by now; a verification failure is reported, not fatal.
@@ -171,6 +185,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           FAUCET: ${{ needs.deploy.outputs.faucet }}
+          TARGET: ${{ inputs.environment }}
         run: |
           set -euo pipefail
           DATE=$(date -u +%Y-%m-%d)
@@ -178,6 +193,6 @@ jobs:
             | sed -n "s#^refs/tags/contract/$DATE\.\([0-9]*\)\$#\1#p" | sort -n | tail -1)
           TAG="contract/$DATE.$(( ${LAST:-0} + 1 ))"
           OBJECT=$(gh api "repos/$GITHUB_REPOSITORY/git/tags" -f tag="$TAG" -f type=commit -f object="$GITHUB_SHA" \
-            -f message="PaseoFaucet $FAUCET, deploy run $GITHUB_RUN_ID" --jq .sha)
+            -f message="PaseoFaucet $FAUCET ($TARGET), deploy run $GITHUB_RUN_ID" --jq .sha)
           gh api "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/tags/$TAG" -f sha="$OBJECT" > /dev/null
           echo "### Tagged \`$TAG\` at ${GITHUB_SHA:0:8}" >> "$GITHUB_STEP_SUMMARY"
