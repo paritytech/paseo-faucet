@@ -1,7 +1,7 @@
 name: Configure contract
 
 # Brings the deployed faucet in line with its settings, signed by the operator account, the
-# faucet's owner. `destinations` follows `launch()` in contracts/script/Deploy.s.sol through
+# faucet's owner. `destinations` follows `launch()` in contracts/script/Launch.sol through
 # contracts/script/Configure.s.sol; `claims` follows the environment's MAX_CLAIMS_PER_EPOCH and
 # CLAIM_ASSETS through contracts/script/ConfigureClaims.s.sol. forge simulates the script as the
 # account's Ethereum address, which plans a call for each setting the faucet holds differently, and
