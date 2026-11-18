@@ -17,6 +17,8 @@ enum Transfer {
 ///      decodes sorted assets. A zero `pusd` leaves pUSD out of the program.
 library XcmProgram {
     uint32 internal constant RELAY = 0;
+    /// @notice The asset id `depositOne` reads as PAS; any other id is a pallet-assets id.
+    uint32 internal constant NATIVE = 0;
 
     uint8 private constant ASSETS_PALLET = 50;
     uint128 private constant PUSD_ASSET_ID = 50_000_413;
@@ -31,6 +33,13 @@ library XcmProgram {
     /// @notice `WithdrawAsset`, then `DepositAsset` to `recipient` on Asset Hub.
     function deposit(bytes32 recipient, uint128 pas, uint128 pusd) internal pure returns (bytes memory) {
         return bytes.concat(V5, compact(2), WITHDRAW_ASSET, _assets(pas, pusd), _depositAll(_count(pusd), recipient));
+    }
+
+    /// @notice `WithdrawAsset` of one asset, then `DepositAsset` to `recipient` on Asset Hub. `assetId` is `NATIVE`
+    ///         for PAS, otherwise the pallet-assets id `(0, [PalletInstance(50), GeneralIndex(assetId)])`.
+    function depositOne(bytes32 recipient, uint32 assetId, uint128 amount) internal pure returns (bytes memory) {
+        bytes memory asset = assetId == NATIVE ? _pas(amount) : _asset(assetId, amount);
+        return bytes.concat(V5, compact(2), WITHDRAW_ASSET, compact(1), asset, _depositAll(1, recipient));
     }
 
     /// @notice `WithdrawAsset`, `SetFeesMode`, then `InitiateTransfer` to `destination`, where `remoteFee` of the
@@ -98,7 +107,11 @@ library XcmProgram {
     }
 
     function _pusd(uint128 amount) private pure returns (bytes memory) {
-        return bytes.concat(hex"000204", bytes1(ASSETS_PALLET), hex"05", compact(PUSD_ASSET_ID), _fungible(amount));
+        return _asset(PUSD_ASSET_ID, amount);
+    }
+
+    function _asset(uint256 assetId, uint128 amount) private pure returns (bytes memory) {
+        return bytes.concat(hex"000204", bytes1(ASSETS_PALLET), hex"05", compact(assetId), _fungible(amount));
     }
 
     function _fungible(uint128 amount) private pure returns (bytes memory) {
