@@ -581,13 +581,15 @@ runbook below deploys the same script by hand with an Ethereum key.
 | Workflow | Runs | Does |
 |---|---|---|
 | Deploy contract (`deploy-contract.yml`) | dispatched on `main` | simulates `Deploy.s.sol` as the operator account's Ethereum address, sends the simulated transactions to Paseo Asset Hub as Substrate extrinsics signed by that account (`deploy/contract.ts`), checks the deployed settings, verifies the source on Blockscout, and tags the commit `contract/<YYYY-MM-DD>.<n>` with the address |
-| Configure contract (`configure-contract.yml`) | dispatched on `main` | simulates `Configure.s.sol` as the operator account's Ethereum address, which plans a `setDestination` for each `launch()` entry the faucet at `FAUCET_ADDRESS` lacks or holds differently, sends those calls in one batch signed by that account, then simulates again and fails unless nothing is left to change. A faucet already in line gets no transaction |
+| Configure contract (`configure-contract.yml`) | dispatched on `main` | with `destinations`, simulates `Configure.s.sol` as the operator account's Ethereum address, which plans a `setDestination` for each `launch()` entry the faucet at `FAUCET_ADDRESS` lacks or holds differently; with `claims`, simulates `ConfigureClaims.s.sol`, which plans the claim settings that differ from `MAX_CLAIMS_PER_EPOCH` and `CLAIM_ASSETS`. It sends those calls in one batch signed by that account, then simulates again and fails unless nothing is left to change. A faucet already in line gets no transaction |
 | Deploy app (`deploy-app.yml`) | dispatched on `main` | checks that `FAUCET_ADDRESS` is a `paseo-faucet:v2` contract for `PRODUCT_ID`, builds `frontend/`, publishes it under `PRODUCT_ID` on the PCF devnet with `polkadot-app-deploy`, and releases an archive of every block the name points at as `app/<YYYY-MM-DD>.<n>` |
 | Keep app alive (`keep-app-alive.yml`) | every day, and on demand with `force` | stores the latest `app/*` release's blocks again once the oldest is 13 days old or one is missing ([below](#keeping-the-app-stored)) |
 
-They read the `paseo` environment. Restrict it to the `main` branch, and give it no
-required reviewers: Keep app alive runs on a schedule, and a scheduled run would wait for
-an approval every day.
+They read the `paseo` environment. Deploy contract and Configure contract also take an
+`environment` input, so the same operator account can deploy and configure a further
+instance from its own environment ([below](#a-claims-only-instance)). Restrict every such
+environment to the `main` branch, and give `paseo` no required reviewers: Keep app alive runs
+on a schedule, and a scheduled run would wait for an approval every day.
 
 | Name | Kind | Used by | Value |
 |---|---|---|---|
@@ -597,6 +599,8 @@ an approval every day.
 | `EPOCH_SECONDS`, `MAX_DRIPS_PER_EPOCH`, `LITE_PAS`, `LITE_PUSD`, `FULL_PAS`, `FULL_PUSD` | variables | Deploy contract | as in [Calls](#calls) |
 | `OWNER`, `PAUSER` | variables | Deploy contract | the owner and the pauser. The operator account's Ethereum address, which the run prints, makes it both, with no handover; any other `OWNER` accepts ownership after the deploy (step 5 of [Calls](#calls)) |
 | `FAUCET_ADDRESS` | variable | Deploy app, Configure contract | the deployed contract, from the Deploy contract run's summary |
+| `MAX_CLAIMS_PER_EPOCH` | variable | Configure contract with `claims` | the cap on claims per epoch |
+| `CLAIM_ASSETS` | variable | Configure contract with `claims` | comma-separated `asset:maxClaim:lite:full` entries: the token (0 for PAS, else a pallet-assets id), the most one claim pays and each tier's allowance per epoch, all in base units (plancks for PAS) |
 
 The order is: Deploy contract; when `OWNER` is not the operator, `OWNER` accepts ownership
 (step 5 of [Calls](#calls)); set `FAUCET_ADDRESS`; fund the faucet (steps 6 and 7); Deploy
@@ -604,6 +608,16 @@ app; then Keep app alive once with `force`, to check the operator account's stor
 authorization end to end. All four workflows share one concurrency group, since they sign
 with the same account. The workflows print no secret, and only the release and tag jobs,
 which hold none, can write to the repository.
+
+### A claims-only instance
+
+A product that pays exact amounts with `claim`, rather than drips, gets an instance of its own
+with its `productId`. Give it an environment, for example `paseo-getcash`, holding the same
+`MNEMONIC`, `PRODUCT_ID` set to the product's DotNS name, `EPOCH_SECONDS`, `OWNER`, `PAUSER`,
+`MAX_DRIPS_PER_EPOCH` of 0 and tier amounts of 0, so that it never drips, and its
+`MAX_CLAIMS_PER_EPOCH` and `CLAIM_ASSETS`. Then run Deploy contract on that environment, set
+its `FAUCET_ADDRESS`, run Configure contract with `claims`, and fund the contract with the
+listed tokens. Deploy app and Keep app alive are for faucet.dot only.
 
 ### Keeping the app stored
 
