@@ -563,7 +563,7 @@ be registered. Launch entries, in plancks and pUSD base units:
 | 1501 | Bulletin Next | `Teleport` | `None` | 1e9 (0.1 PAS) | 5e9 (0.5 PAS) | 2e9 (existential deposit 1e9 + `remoteFee`) | 0 |
 | 1502 | People Next System | `Teleport` | `None` | 1e8 (0.01 PAS) | 5e9 (0.5 PAS) | 1.1e9 (existential deposit 1e9 + `remoteFee`) | 0 |
 
-The values are `launch()` in `contracts/script/Deploy.s.sol`, measured in [E6]
+The values are `launch()` in `contracts/script/Launch.sol`, measured in [E6]
 (`launchEntries`): every `remoteFee` is at least 13 times its destination's measured execution
 fee (People 31, Bulletin and Bulletin Next 13, Asset Hub Next 15, People Next 919) and every
 `maxDeliveryFee` 16 times the measured delivery fee. The relay chain is not in the launch set.

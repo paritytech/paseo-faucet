@@ -67,7 +67,7 @@ contract PaseoFaucetClaimTest is Test {
     // Formats
 
     function test_claimMessageFor_layout() public view {
-        bytes memory message = faucet.claimMessageFor(START_EPOCH, RECIPIENT, USDT_ID, 5e6, 2);
+        bytes memory message = faucet.claimMessageFor(START_EPOCH, RECIPIENT, USDT_ID, 5e6);
         bytes memory expected = bytes.concat(
             hex"706173656f2d6661756365743a636c61696d3a7631",
             bytes20(address(faucet)),
@@ -75,10 +75,9 @@ contract PaseoFaucetClaimTest is Test {
             hex"0000000000004e20",
             RECIPIENT,
             hex"000007c0",
-            hex"000000000000000000000000004c4b40",
-            hex"00000002"
+            hex"000000000000000000000000004c4b40"
         );
-        assertEq(message.length, 113);
+        assertEq(message.length, 109);
         assertEq(message, expected);
     }
 
@@ -94,18 +93,18 @@ contract PaseoFaucetClaimTest is Test {
     // Claim
 
     function test_claim_paysPas() public {
-        _prove(Tier.Lite, PAS, 1_000e10, 0);
+        _prove(Tier.Lite, PAS, 1_000e10);
         _expectClaimed(Tier.Lite, PAS, 1_000e10);
         _claim(Tier.Lite, PAS, 1_000e10);
 
         _assertExecuted(XcmProgram.depositOne(RECIPIENT, PAS, 1_000e10));
         assertEq(faucet.claimed(START_EPOCH, Tier.Lite, ALIAS, PAS), 1_000e10);
-        assertEq(faucet.claimCount(START_EPOCH, Tier.Lite, ALIAS), 1);
+        assertTrue(_paid(Tier.Lite, PAS, 1_000e10));
         assertEq(faucet.claimsInEpoch(START_EPOCH), 1);
     }
 
     function test_claim_paysAPalletAsset() public {
-        _prove(Tier.Lite, USDT_ID, 70_000, 0);
+        _prove(Tier.Lite, USDT_ID, 70_000);
         _expectClaimed(Tier.Lite, USDT_ID, 70_000);
         _claim(Tier.Lite, USDT_ID, 70_000);
 
@@ -113,21 +112,28 @@ contract PaseoFaucetClaimTest is Test {
         assertEq(faucet.claimed(START_EPOCH, Tier.Lite, ALIAS, USDT_ID), 70_000);
     }
 
-    function test_claim_aProofPaysOnce() public {
-        _prove(Tier.Lite, PUSD_ID, 10e6, 0);
+    function test_claim_aClaimPaysOnce() public {
+        _prove(Tier.Lite, PUSD_ID, 10e6);
         _claim(Tier.Lite, PUSD_ID, 10e6);
-        vm.expectRevert(PaseoFaucet.InvalidProof.selector);
-        _claim(Tier.Lite, PUSD_ID, 10e6);
+        _expectClaimRevert(Tier.Lite, PUSD_ID, 10e6, PaseoFaucet.AlreadyClaimed.selector);
 
-        _prove(Tier.Lite, PUSD_ID, 10e6, 1);
-        _claim(Tier.Lite, PUSD_ID, 10e6);
-        assertEq(faucet.claimCount(START_EPOCH, Tier.Lite, ALIAS), 2);
-        assertEq(faucet.claimed(START_EPOCH, Tier.Lite, ALIAS, PUSD_ID), 20e6);
+        _prove(Tier.Lite, PUSD_ID, 11e6);
+        _claim(Tier.Lite, PUSD_ID, 11e6);
+        assertEq(faucet.claimed(START_EPOCH, Tier.Lite, ALIAS, PUSD_ID), 21e6);
+        assertEq(faucet.claimsInEpoch(START_EPOCH), 2);
+    }
+
+    function test_claimKey_bindsRecipientAssetAndAmount() public view {
+        bytes32 key = faucet.claimKey(RECIPIENT, PUSD_ID, 10e6);
+        assertEq(key, keccak256(abi.encode(RECIPIENT, PUSD_ID, uint128(10e6))));
+        assertTrue(key != faucet.claimKey(bytes32(uint256(1)), PUSD_ID, 10e6));
+        assertTrue(key != faucet.claimKey(RECIPIENT, USDT_ID, 10e6));
+        assertTrue(key != faucet.claimKey(RECIPIENT, PUSD_ID, 10e6 + 1));
     }
 
     function test_claim_theProofBindsRecipientAssetAmountAndTier() public {
         faucet.setClaimAllowance(Tier.Full, PUSD_ID, LITE_STABLE_ALLOWANCE);
-        _prove(Tier.Lite, PUSD_ID, 10e6, 0);
+        _prove(Tier.Lite, PUSD_ID, 10e6);
         vm.expectRevert(PaseoFaucet.InvalidProof.selector);
         faucet.claim(Tier.Lite, bytes32(uint256(1)), PUSD_ID, 10e6, PROOF, ALIAS, RING, REVISION);
         vm.expectRevert(PaseoFaucet.InvalidProof.selector);
@@ -139,18 +145,18 @@ contract PaseoFaucetClaimTest is Test {
     }
 
     function test_claim_allowanceIsPerTierAssetAndEpoch() public {
-        _prove(Tier.Lite, PAS, MAX_PAS, 0);
+        _prove(Tier.Lite, PAS, MAX_PAS);
         _claim(Tier.Lite, PAS, MAX_PAS);
         _expectClaimRevert(Tier.Lite, PAS, 1, PaseoFaucet.AllowanceExceeded.selector);
 
-        _prove(Tier.Lite, USDT_ID, 1e6, 1);
+        _prove(Tier.Lite, USDT_ID, 1e6);
         _claim(Tier.Lite, USDT_ID, 1e6);
-        _prove(Tier.Full, PAS, MAX_PAS, 0);
+        _prove(Tier.Full, PAS, MAX_PAS);
         _claim(Tier.Full, PAS, MAX_PAS);
 
         vm.warp((START_EPOCH + 1) * EPOCH_SECONDS);
         uint64 next = START_EPOCH + 1;
-        personhood.accept(_request(Tier.Lite, next, PAS, MAX_PAS, 0));
+        personhood.accept(_request(Tier.Lite, next, PAS, MAX_PAS));
         _claim(Tier.Lite, PAS, MAX_PAS);
         assertEq(faucet.claimed(next, Tier.Lite, ALIAS, PAS), MAX_PAS);
         assertEq(faucet.claimed(START_EPOCH, Tier.Lite, ALIAS, PAS), MAX_PAS);
@@ -184,41 +190,41 @@ contract PaseoFaucetClaimTest is Test {
 
     function test_claim_epochCapCountsEveryClaim() public {
         faucet.setMaxClaimsPerEpoch(2);
-        _prove(Tier.Lite, PAS, 1e10, 0);
+        _prove(Tier.Lite, PAS, 1e10);
         _claim(Tier.Lite, PAS, 1e10);
-        _prove(Tier.Lite, PAS, 1e10, 1);
-        _claim(Tier.Lite, PAS, 1e10);
-        _prove(Tier.Lite, PAS, 1e10, 2);
-        _expectClaimRevert(Tier.Lite, PAS, 1e10, PaseoFaucet.EpochCapReached.selector);
+        _prove(Tier.Lite, PAS, 2e10);
+        _claim(Tier.Lite, PAS, 2e10);
+        _prove(Tier.Lite, PAS, 3e10);
+        _expectClaimRevert(Tier.Lite, PAS, 3e10, PaseoFaucet.EpochCapReached.selector);
         assertEq(faucet.claimsInEpoch(START_EPOCH), 2);
     }
 
     function test_claim_failedPayoutRecordsNothing() public {
         xcm.setFails(XcmProgram.depositOne(RECIPIENT, PUSD_ID, 1e6), true);
-        _prove(Tier.Lite, PUSD_ID, 1e6, 0);
+        _prove(Tier.Lite, PUSD_ID, 1e6);
         _expectClaimRevert(Tier.Lite, PUSD_ID, 1e6, PaseoFaucet.PayoutFailed.selector);
         _assertNothingRecorded();
     }
 
     function test_claim_revertsWhenThePayoutTakesMorePasThanClaimed() public {
         xcm.setOutflow(1);
-        _prove(Tier.Lite, USDT_ID, 1e6, 0);
+        _prove(Tier.Lite, USDT_ID, 1e6);
         _expectClaimRevert(Tier.Lite, USDT_ID, 1e6, PaseoFaucet.PayoutFailed.selector);
 
         xcm.setOutflow(1e10 * 1e8 + 1);
-        _prove(Tier.Lite, PAS, 1e10, 0);
+        _prove(Tier.Lite, PAS, 1e10);
         _expectClaimRevert(Tier.Lite, PAS, 1e10, PaseoFaucet.PayoutFailed.selector);
 
         xcm.setOutflow(1e10 * 1e8);
         _claim(Tier.Lite, PAS, 1e10);
-        assertEq(faucet.claimCount(START_EPOCH, Tier.Lite, ALIAS), 1);
+        assertTrue(_paid(Tier.Lite, PAS, 1e10));
     }
 
     function test_claim_anyoneCanSubmitAProof() public {
-        _prove(Tier.Lite, PAS, 1e10, 0);
+        _prove(Tier.Lite, PAS, 1e10);
         vm.prank(stranger);
         _claim(Tier.Lite, PAS, 1e10);
-        assertEq(faucet.claimCount(START_EPOCH, Tier.Lite, ALIAS), 1);
+        assertTrue(_paid(Tier.Lite, PAS, 1e10));
     }
 
     // Owner
@@ -280,7 +286,7 @@ contract PaseoFaucetClaimTest is Test {
 
     // Helpers
 
-    function _request(Tier tier, uint64 epoch, uint32 asset, uint128 amount, uint32 nonce)
+    function _request(Tier tier, uint64 epoch, uint32 asset, uint128 amount)
         internal
         view
         returns (IPersonhood.ProofVerificationRequest memory)
@@ -292,12 +298,12 @@ contract PaseoFaucetClaimTest is Test {
             ringIndex: RING,
             context: faucet.contextFor(epoch),
             revision: REVISION,
-            message: faucet.claimMessageFor(epoch, RECIPIENT, asset, amount, nonce)
+            message: faucet.claimMessageFor(epoch, RECIPIENT, asset, amount)
         });
     }
 
-    function _prove(Tier tier, uint32 asset, uint128 amount, uint32 nonce) internal {
-        personhood.accept(_request(tier, START_EPOCH, asset, amount, nonce));
+    function _prove(Tier tier, uint32 asset, uint128 amount) internal {
+        personhood.accept(_request(tier, START_EPOCH, asset, amount));
     }
 
     function _claim(Tier tier, uint32 asset, uint128 amount) internal {
@@ -321,9 +327,13 @@ contract PaseoFaucetClaimTest is Test {
         assertEq(weights[0].refTime, program.length * 1000);
     }
 
+    function _paid(Tier tier, uint32 asset, uint128 amount) internal view returns (bool) {
+        return faucet.claimPaid(START_EPOCH, tier, ALIAS, faucet.claimKey(RECIPIENT, asset, amount));
+    }
+
     function _assertNothingRecorded() internal view {
         assertEq(faucet.claimsInEpoch(START_EPOCH), 0);
-        assertEq(faucet.claimCount(START_EPOCH, Tier.Lite, ALIAS), 0);
+        assertEq(faucet.claimed(START_EPOCH, Tier.Lite, ALIAS, PUSD_ID), 0);
         (bytes[] memory messages,) = xcm.executed();
         assertEq(messages.length, 0);
     }
