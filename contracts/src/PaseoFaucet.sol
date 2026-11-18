@@ -104,8 +104,9 @@ contract PaseoFaucet {
     mapping(
         uint64 epoch => mapping(Tier tier => mapping(bytes32 contextAlias => mapping(uint32 asset => uint128)))
     ) public claimed;
-    /// @dev How many claims an alias made in an epoch; the next claim's proof signs it, so each proof pays once.
-    mapping(uint64 epoch => mapping(Tier tier => mapping(bytes32 contextAlias => uint32))) public claimCount;
+    /// @dev Whether the alias was paid the claim `claimKey(recipient, asset, amount)` in the epoch: each pays once.
+    mapping(uint64 epoch => mapping(Tier tier => mapping(bytes32 contextAlias => mapping(bytes32 key => bool)))) public
+        claimPaid;
 
     event Dripped(
         uint64 indexed epoch,
@@ -245,8 +246,8 @@ contract PaseoFaucet {
     }
 
     /// @notice Pays `amount` of `asset` to `recipient` on Asset Hub for a person of `tier`, within the tier's allowance
-    ///         for that asset this epoch. The proof signs `claimMessageFor`, which binds the recipient, the asset, the
-    ///         amount and the alias's claim count, so a proof pays exactly one claim.
+    ///         for that asset this epoch. The proof signs `claimMessageFor`, which binds the recipient, the asset and the
+    ///         amount, and the same claim pays an alias once per epoch, so a proof pays exactly once.
     /// @param proof The SCALE-encoded ring proof (compact length prefix included), forwarded unchanged.
     function claim(
         Tier tier,
@@ -258,7 +259,7 @@ contract PaseoFaucet {
         uint32 ringIndex,
         uint32 revision
     ) external {
-        (uint64 epoch, uint32 nonce) = _claimable(tier, contextAlias, asset, amount);
+        (uint64 epoch, bytes32 key) = _claimable(tier, contextAlias, recipient, asset, amount);
         IPersonhood.ProofVerificationRequest memory verification;
         verification.expectedStatus = uint8(tier);
         verification.proof = proof;
@@ -266,10 +267,10 @@ contract PaseoFaucet {
         verification.ringIndex = ringIndex;
         verification.context = contextFor(epoch);
         verification.revision = revision;
-        verification.message = claimMessageFor(epoch, recipient, asset, amount, nonce);
+        verification.message = claimMessageFor(epoch, recipient, asset, amount);
         if (!PERSONHOOD.personhoodInfoByProof(verification)) revert InvalidProof();
         claimed[epoch][tier][contextAlias][asset] += amount;
-        claimCount[epoch][tier][contextAlias] = nonce + 1;
+        claimPaid[epoch][tier][contextAlias][key] = true;
         ++claimsInEpoch[epoch];
         emit Claimed(epoch, tier, contextAlias, recipient, asset, amount);
         _payClaim(recipient, asset, amount);
@@ -421,9 +422,9 @@ contract PaseoFaucet {
         return abi.encodePacked(DOMAIN, address(this), uint64(block.chainid), epoch, recipient);
     }
 
-    /// @notice The 113-byte message a claim proof must sign: claim domain, contract, chain id, epoch, recipient, asset,
-    ///         amount and the alias's claim count in the epoch.
-    function claimMessageFor(uint64 epoch, bytes32 recipient, uint32 asset, uint128 amount, uint32 nonce)
+    /// @notice The 109-byte message a claim proof must sign: claim domain, contract, chain id, epoch, recipient, asset
+    ///         and amount.
+    function claimMessageFor(uint64 epoch, bytes32 recipient, uint32 asset, uint128 amount)
         public
         view
         returns (bytes memory)
@@ -431,7 +432,12 @@ contract PaseoFaucet {
         // casting to 'uint64' is safe because the message encodes the chain id as u64 and Paseo Asset Hub's fits
         // forge-lint: disable-next-line(unsafe-typecast)
         uint64 chainId = uint64(block.chainid);
-        return abi.encodePacked(CLAIM_DOMAIN, address(this), chainId, epoch, recipient, asset, amount, nonce);
+        return abi.encodePacked(CLAIM_DOMAIN, address(this), chainId, epoch, recipient, asset, amount);
+    }
+
+    /// @notice The key `claimPaid` records a claim under.
+    function claimKey(bytes32 recipient, uint32 asset, uint128 amount) public pure returns (bytes32) {
+        return keccak256(abi.encode(recipient, asset, amount));
     }
 
     /// @notice The ERC20 precompile of the pallet-assets token `asset`: its id in the top four bytes, then `0x01200000`.
@@ -546,11 +552,11 @@ contract PaseoFaucet {
         if (address(this).balance + _maxOutflow(d, pas) < before) revert PayoutFailed();
     }
 
-    /// @dev The checks that need no proof. Returns the epoch and the alias's claim count in it.
-    function _claimable(Tier tier, bytes32 contextAlias, uint32 asset, uint128 amount)
+    /// @dev The checks that need no proof. Returns the epoch and the claim's key.
+    function _claimable(Tier tier, bytes32 contextAlias, bytes32 recipient, uint32 asset, uint128 amount)
         private
         view
-        returns (uint64 epoch, uint32 nonce)
+        returns (uint64 epoch, bytes32 key)
     {
         if (paused) revert FaucetPaused();
         ClaimAsset memory config = claimAsset[asset];
@@ -560,8 +566,9 @@ contract PaseoFaucet {
         uint256 total = uint256(claimed[epoch][tier][contextAlias][asset]) + amount;
         if (total > claimAllowance[tier][asset]) revert AllowanceExceeded();
         if (claimsInEpoch[epoch] >= maxClaimsPerEpoch) revert EpochCapReached();
+        key = claimKey(recipient, asset, amount);
+        if (claimPaid[epoch][tier][contextAlias][key]) revert AlreadyClaimed();
         if (!_holds(asset, amount)) revert InsufficientFunds();
-        nonce = claimCount[epoch][tier][contextAlias];
     }
 
     /// @dev Pays a claim with a local deposit. Reverts if the deposit fails or takes more PAS than the claim pays.
