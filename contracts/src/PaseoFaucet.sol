@@ -42,6 +42,13 @@ struct Allowance {
     uint128 pusd;
 }
 
+/// @notice An Asset Hub token that `claim` pays: PAS as `XcmProgram.NATIVE`, otherwise a pallet-assets id.
+///         `maxClaim` is the most one claim pays, in the token's base units.
+struct ClaimAsset {
+    bool enabled;
+    uint128 maxClaim;
+}
+
 /// @notice Why a claim left an enabled destination unpaid; `None` when it did not.
 enum Skip {
     None,
@@ -54,9 +61,11 @@ enum Skip {
 /// @notice Pays PAS and pUSD at most once per person, tier, epoch and destination to an `AccountId32`, on Asset Hub
 ///         and on every enabled destination chain at once. A person proves membership with a ring proof that
 ///         `IPersonhood` verifies against a context and a message the contract derives itself. Accounts the owner
-///         whitelists request amounts without a proof, within an allowance per epoch.
+///         whitelists request amounts without a proof, within an allowance per epoch. A person can also claim an
+///         amount of their choice of one listed token on Asset Hub, within an allowance per tier, token and epoch.
 contract PaseoFaucet {
     bytes15 public constant DOMAIN = "paseo-faucet:v2";
+    bytes21 public constant CLAIM_DOMAIN = "paseo-faucet:claim:v1";
     bytes28 public constant INDEX_MAGIC = 0x12e86013736c5498f050b03cdc16957dff0e422fb92ca77ec3ab168f;
     uint32 public constant ASSET_HUB = 1000;
     uint32 public constant RELAY = XcmProgram.RELAY;
@@ -88,6 +97,16 @@ contract PaseoFaucet {
     mapping(uint64 epoch => mapping(Tier tier => mapping(bytes32 contextAlias => uint256))) private _paid;
     mapping(address account => Allowance) public whitelist;
     mapping(uint64 epoch => mapping(address account => Allowance)) public requested;
+    uint32 public maxClaimsPerEpoch;
+    mapping(uint32 asset => ClaimAsset) public claimAsset;
+    mapping(Tier tier => mapping(uint32 asset => uint128)) public claimAllowance;
+    mapping(uint64 epoch => uint32) public claimsInEpoch;
+    mapping(
+        uint64 epoch => mapping(Tier tier => mapping(bytes32 contextAlias => mapping(uint32 asset => uint128)))
+    ) public claimed;
+    /// @dev Whether the alias was paid the claim `claimKey(recipient, asset, amount)` in the epoch: each pays once.
+    mapping(uint64 epoch => mapping(Tier tier => mapping(bytes32 contextAlias => mapping(bytes32 key => bool)))) public
+        claimPaid;
 
     event Dripped(
         uint64 indexed epoch,
@@ -114,6 +133,14 @@ contract PaseoFaucet {
         uint128 pas,
         uint128 pusd
     );
+    event Claimed(
+        uint64 indexed epoch,
+        Tier tier,
+        bytes32 contextAlias,
+        bytes32 indexed recipient,
+        uint32 indexed asset,
+        uint128 amount
+    );
     event TierUpdated(Tier indexed tier, TierConfig config);
     event EpochCapUpdated(uint32 maxDripsPerEpoch);
     event DestinationSet(uint32 indexed id, Destination entry);
@@ -124,6 +151,10 @@ contract PaseoFaucet {
     event PauserUpdated(address newPauser);
     event WhitelistUpdated(address indexed account, Allowance allowance);
     event Withdrawn(address indexed to, uint128 pas, uint256 pusd);
+    event ClaimAssetSet(uint32 indexed asset, ClaimAsset config);
+    event ClaimAllowanceSet(Tier indexed tier, uint32 indexed asset, uint128 amount);
+    event ClaimCapUpdated(uint32 maxClaimsPerEpoch);
+    event AssetWithdrawn(address indexed to, uint32 indexed asset, uint256 amount);
     event OwnershipTransferStarted(address indexed previousOwner, address indexed newOwner);
     event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
 
@@ -142,6 +173,9 @@ contract PaseoFaucet {
     error NotWhitelisted();
     error InvalidRequest();
     error AllowanceExceeded();
+    error UnknownAsset();
+    error ClaimTooLarge();
+    error InsufficientFunds();
 
     modifier onlyOwner() {
         if (msg.sender != owner) revert NotOwner();
@@ -211,6 +245,37 @@ contract PaseoFaucet {
         _pay(d, recipient, pas, pusd);
     }
 
+    /// @notice Pays `amount` of `asset` to `recipient` on Asset Hub for a person of `tier`, within the tier's allowance
+    ///         for that asset this epoch. The proof signs `claimMessageFor`, which binds the recipient, the asset and the
+    ///         amount, and the same claim pays an alias once per epoch, so a proof pays exactly once.
+    /// @param proof The SCALE-encoded ring proof (compact length prefix included), forwarded unchanged.
+    function claim(
+        Tier tier,
+        bytes32 recipient,
+        uint32 asset,
+        uint128 amount,
+        bytes calldata proof,
+        bytes32 contextAlias,
+        uint32 ringIndex,
+        uint32 revision
+    ) external {
+        (uint64 epoch, bytes32 key) = _claimable(tier, contextAlias, recipient, asset, amount);
+        IPersonhood.ProofVerificationRequest memory verification;
+        verification.expectedStatus = uint8(tier);
+        verification.proof = proof;
+        verification.expectedAlias = contextAlias;
+        verification.ringIndex = ringIndex;
+        verification.context = contextFor(epoch);
+        verification.revision = revision;
+        verification.message = claimMessageFor(epoch, recipient, asset, amount);
+        if (!PERSONHOOD.personhoodInfoByProof(verification)) revert InvalidProof();
+        claimed[epoch][tier][contextAlias][asset] += amount;
+        claimPaid[epoch][tier][contextAlias][key] = true;
+        ++claimsInEpoch[epoch];
+        emit Claimed(epoch, tier, contextAlias, recipient, asset, amount);
+        _payClaim(recipient, asset, amount);
+    }
+
     /// @notice Pays one destination's part of a drip. Only the faucet calls it, so that a failed payout reverts alone.
     function payLeg(Destination calldata d, bytes32 recipient, uint128 pas, uint128 pusd) external {
         if (msg.sender != address(this)) revert NotSelf();
@@ -226,6 +291,25 @@ contract PaseoFaucet {
     function setMaxDripsPerEpoch(uint32 cap) external onlyOwner {
         maxDripsPerEpoch = cap;
         emit EpochCapUpdated(cap);
+    }
+
+    function setMaxClaimsPerEpoch(uint32 cap) external onlyOwner {
+        maxClaimsPerEpoch = cap;
+        emit ClaimCapUpdated(cap);
+    }
+
+    /// @notice Lists `asset` for claims with the most one claim pays, or turns its claims off with `enabled` false.
+    function setClaimAsset(uint32 asset, ClaimAsset calldata config) external onlyOwner {
+        if (config.enabled && config.maxClaim == 0) revert InvalidConfig();
+        claimAsset[asset] = config;
+        emit ClaimAssetSet(asset, config);
+    }
+
+    /// @notice What a person of `tier` may claim of `asset` per epoch; zero turns those claims off.
+    function setClaimAllowance(Tier tier, uint32 asset, uint128 amount) external onlyOwner {
+        if (tier == Tier.None) revert InvalidConfig();
+        claimAllowance[tier][asset] = amount;
+        emit ClaimAllowanceSet(tier, asset, amount);
     }
 
     // address(0) leaves the faucet without a pauser
@@ -290,6 +374,15 @@ contract PaseoFaucet {
         emit Withdrawn(msg.sender, pas, pusd);
     }
 
+    /// @notice Sends `amount` base units of the pallet-assets token `asset` to the owner. PAS and pUSD also leave
+    ///         through `withdraw`.
+    function withdrawAsset(uint32 asset, uint256 amount) external onlyOwner {
+        if (asset == XcmProgram.NATIVE || !assetToken(asset).transfer(msg.sender, amount)) revert PayoutFailed();
+        // the transfer before it pays the owner, the only caller
+        // forge-lint: disable-next-line(reentrancy-events)
+        emit AssetWithdrawn(msg.sender, asset, amount);
+    }
+
     // address(0) cancels a pending transfer
     // forge-lint: disable-next-line(missing-zero-check)
     function transferOwnership(address newOwner) external onlyOwner {
@@ -327,6 +420,29 @@ contract PaseoFaucet {
         // casting to 'uint64' is safe because the message encodes the chain id as u64 and Paseo Asset Hub's fits
         // forge-lint: disable-next-line(unsafe-typecast)
         return abi.encodePacked(DOMAIN, address(this), uint64(block.chainid), epoch, recipient);
+    }
+
+    /// @notice The 109-byte message a claim proof must sign: claim domain, contract, chain id, epoch, recipient, asset
+    ///         and amount.
+    function claimMessageFor(uint64 epoch, bytes32 recipient, uint32 asset, uint128 amount)
+        public
+        view
+        returns (bytes memory)
+    {
+        // casting to 'uint64' is safe because the message encodes the chain id as u64 and Paseo Asset Hub's fits
+        // forge-lint: disable-next-line(unsafe-typecast)
+        uint64 chainId = uint64(block.chainid);
+        return abi.encodePacked(CLAIM_DOMAIN, address(this), chainId, epoch, recipient, asset, amount);
+    }
+
+    /// @notice The key `claimPaid` records a claim under.
+    function claimKey(bytes32 recipient, uint32 asset, uint128 amount) public pure returns (bytes32) {
+        return keccak256(abi.encode(recipient, asset, amount));
+    }
+
+    /// @notice The ERC20 precompile of the pallet-assets token `asset`: its id in the top four bytes, then `0x01200000`.
+    function assetToken(uint32 asset) public pure returns (IERC20) {
+        return IERC20(address(uint160(uint256(asset) << 128) | 0x01200000));
     }
 
     /// @notice Whether `contextAlias` has been paid on destination `id` for `tier` in `epoch`.
@@ -434,6 +550,45 @@ contract PaseoFaucet {
             revert PayoutFailed();
         }
         if (address(this).balance + _maxOutflow(d, pas) < before) revert PayoutFailed();
+    }
+
+    /// @dev The checks that need no proof. Returns the epoch and the claim's key.
+    function _claimable(Tier tier, bytes32 contextAlias, bytes32 recipient, uint32 asset, uint128 amount)
+        private
+        view
+        returns (uint64 epoch, bytes32 key)
+    {
+        if (paused) revert FaucetPaused();
+        ClaimAsset memory config = claimAsset[asset];
+        if (!config.enabled) revert UnknownAsset();
+        if (amount == 0 || amount > config.maxClaim) revert ClaimTooLarge();
+        epoch = currentEpoch();
+        uint256 total = uint256(claimed[epoch][tier][contextAlias][asset]) + amount;
+        if (total > claimAllowance[tier][asset]) revert AllowanceExceeded();
+        if (claimsInEpoch[epoch] >= maxClaimsPerEpoch) revert EpochCapReached();
+        key = claimKey(recipient, asset, amount);
+        if (claimPaid[epoch][tier][contextAlias][key]) revert AlreadyClaimed();
+        if (!_holds(asset, amount)) revert InsufficientFunds();
+    }
+
+    /// @dev Pays a claim with a local deposit. Reverts if the deposit fails or takes more PAS than the claim pays.
+    function _payClaim(bytes32 recipient, uint32 asset, uint128 amount) private {
+        bytes memory program = XcmProgram.depositOne(recipient, asset, amount);
+        uint256 before = address(this).balance;
+        // the XCM precompile runs no contract code; the balance check after it bounds what it took
+        // forge-lint: disable-next-line(reentrancy-balance)
+        try XCM.execute(program, XCM.weighMessage(program)) {}
+        catch {
+            revert PayoutFailed();
+        }
+        uint256 pas = asset == XcmProgram.NATIVE ? uint256(amount) * WEI_PER_PLANCK : 0;
+        if (address(this).balance + pas < before) revert PayoutFailed();
+    }
+
+    /// @dev Whether the faucet holds `amount` of `asset`.
+    function _holds(uint32 asset, uint128 amount) private view returns (bool) {
+        if (asset == XcmProgram.NATIVE) return address(this).balance >= uint256(amount) * WEI_PER_PLANCK;
+        return assetToken(asset).balanceOf(address(this)) >= amount;
     }
 
     function _registered(uint32 id) internal view returns (Destination storage d) {

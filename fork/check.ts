@@ -100,7 +100,7 @@ const variant = (base: Entry, id: number, pasTransfer: number, pusdTransfer: num
 
 const out = (path: string) => fileURLToPath(new URL(`../contracts/out/${path}`, import.meta.url));
 const faucetArtifact = loadArtifact(out('FaucetHarness.sol/FaucetHarness.json'));
-const deployArtifact = loadArtifact(out('Deploy.s.sol/Deploy.json'));
+const launchArtifact = loadArtifact(out('Launch.sol/Launch.json'));
 const abi = faucetArtifact.abi;
 const xcmAbi = loadArtifact(out('IXcm.sol/IXcm.json')).abi;
 const erc20Abi = loadArtifact(out('IERC20.sol/IERC20.json')).abi;
@@ -214,8 +214,8 @@ try {
   report.liveRelay = await liveRelay([ah.paraId, ...egress]);
   report.assetHubHrmpEgress = egress;
 
-  const { address: script } = await deploy(ah, deployArtifact);
-  const launch = (await read(ah, script, deployArtifact.abi, 'launch')) as Entry[];
+  const { address: launcher } = await deploy(ah, launchArtifact);
+  const launch = (await read(ah, launcher, launchArtifact.abi, 'launch')) as Entry[];
   const people = launch.find((d) => d.id === chains.people.paraId);
   assert.ok(people, 'People is not a launch destination');
   /** Shapes no other entry uses: built, decoded and dry-run on Asset Hub, never delivered. */

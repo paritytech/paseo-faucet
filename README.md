@@ -5,7 +5,8 @@ once per person, tier, epoch and chain. A person proves membership of People or 
 with a ring proof, which the contract checks with the `IPersonhood` precompile against a
 context and a message it derives itself. One claim pays the recipient on Asset Hub and, by XCM,
 on every other enabled chain. Accounts the owner whitelists request amounts without a proof,
-within an allowance per epoch. No server holds funds or keys, and no server decides who is
+within an allowance per epoch. A person can also claim an amount of their choice of one listed
+Asset Hub token, within an allowance per tier, token and epoch. No server holds funds or keys, and no server decides who is
 eligible.
 
 The front-end is a DotNS product that runs inside the Polkadot hosts. The candidate UI is in
@@ -84,11 +85,11 @@ checks, effects, interactions.
 
 | Role | Can call |
 |---|---|
-| Owner | `setTier`, `setMaxDripsPerEpoch`, `setPauser`, `unpause`, `setDestination`, `removeDestination`, `setWhitelisted`, `withdraw`, `transferOwnership`, plus everything the pauser can |
+| Owner | `setTier`, `setMaxDripsPerEpoch`, `setPauser`, `unpause`, `setDestination`, `removeDestination`, `setWhitelisted`, `setClaimAsset`, `setClaimAllowance`, `setMaxClaimsPerEpoch`, `withdraw`, `withdrawAsset`, `transferOwnership`, plus everything the pauser can |
 | Pauser | `pause`, `disableDestination` |
 | Whitelisted account | `request`, within its allowance per epoch ([below](#whitelisted-requests)) |
 | Pending owner | `acceptOwnership` |
-| Anyone | `drip`, the views, and plain PAS or pUSD transfers to fund the contract |
+| Anyone | `drip`, `claim`, the views, and plain PAS or asset transfers to fund the contract |
 | The faucet itself | `payLeg`, which `drip` calls once per destination |
 
 The deployer is the first owner. Ownership moves in two steps: `transferOwnership(next)` sets
@@ -108,9 +109,15 @@ pending transfer.
 | `destination(id)`, `destinations()` | owner, pauser | The registry ([below](#destinations-and-xcm-programs)). `destination(id)` returns a flat tuple, all zeros for an unknown id; `destinations()` returns the registered entries in the order their ids were first registered. |
 | `whitelist(account)` | owner | `(pas, pusd)`: what the account may request per epoch, PAS in plancks with delivery fees included. Zero means not whitelisted; an allowance of pUSD without PAS is rejected (`InvalidConfig`), since every request carries PAS. |
 | `requested(epoch, account)` | `request` | `(pas, pusd)` the account has used of its allowance in `epoch`. |
+| `maxClaimsPerEpoch` | owner | Global cap on claims per epoch, separate from `maxDripsPerEpoch`. |
+| `claimAsset(asset)` | owner | `(enabled, maxClaim)`: whether `claim` pays the token and the most one claim pays, in its base units. `asset` 0 is PAS; any other value is a pallet-assets id. |
+| `claimAllowance(tier, asset)` | owner | What a person of `tier` may claim of `asset` per epoch. Zero turns those claims off. |
+| `claimsInEpoch(epoch)` | `claim` | |
+| `claimed(epoch, tier, contextAlias, asset)` | `claim` | What the alias has claimed of `asset` in `epoch`. |
+| `claimPaid(epoch, tier, contextAlias, key)` | `claim` | Whether the alias was paid the claim `claimKey(recipient, asset, amount)` in `epoch`. Each claim pays an alias once per epoch. |
 
-A new deployment is inert: both tiers are disabled, the cap is 0 and there are no
-destinations. The constants `DOMAIN`, `INDEX_MAGIC`, `ASSET_HUB` (1000), `RELAY` (0) and the
+A new deployment is inert: both tiers are disabled, both caps are 0, no token is listed for
+claims and there are no destinations. The constants `DOMAIN`, `CLAIM_DOMAIN`, `INDEX_MAGIC`, `ASSET_HUB` (1000), `RELAY` (0) and the
 precompile addresses are public.
 
 | Precompile | Address |
@@ -119,6 +126,7 @@ precompile addresses are public.
 | `ISystem` | `0x0000000000000000000000000000000000000900` |
 | XCM | `0x00000000000000000000000000000000000A0000` |
 | pUSD ERC20 (asset `50000413`) | `0x02FaF21d00000000000000000000000001200000` |
+| Any pallet-assets ERC20 | the asset id in the top four bytes, then `0x01200000`; `assetToken(asset)` returns it |
 
 ### Units
 
@@ -183,6 +191,30 @@ destination, with no proof, as often as its allowance allows: the once-per-epoch
 Counting the `maxDeliveryFee` bounds what a leaked whitelisted key can cost by its allowance,
 however small its requests. To pay several chains, an account sends one request per chain.
 
+### Claims
+
+`claim(tier, recipient, asset, amount, proof, contextAlias, ringIndex, revision)` pays `amount`
+of one listed token to `recipient` on Asset Hub, with a local XCM deposit. A product that must
+pay an exact sum, such as a deposit address, uses it instead of `drip`. The once-per-epoch rule
+does not apply: a person claims as often as the allowance allows.
+
+| # | Rule | Error |
+|---|---|---|
+| 1 | The faucet is not paused. | `FaucetPaused` |
+| 2 | `asset` is listed and enabled. | `UnknownAsset` |
+| 3 | `amount` is not zero and at most the asset's `maxClaim`. | `ClaimTooLarge` |
+| 4 | `amount` fits in what is left of `claimAllowance(tier, asset)` for the alias this epoch. | `AllowanceExceeded` |
+| 5 | Claims this epoch are below `maxClaimsPerEpoch`. | `EpochCapReached` |
+| 6 | The alias has not been paid this recipient, asset and amount this epoch. | `AlreadyClaimed` |
+| 7 | The faucet holds `amount` of the asset (spendable PAS for asset 0). | `InsufficientFunds` |
+| 8 | `personhoodInfoByProof` returns true for `expectedStatus = tier`, the proof, `contextAlias`, `ringIndex`, `revision`, `contextFor(epoch)` and `claimMessageFor(epoch, recipient, asset, amount)`. | `InvalidProof` |
+| 9 | Record the amount, the paid claim and the epoch count, and emit `Claimed`. | |
+| 10 | Execute the deposit. It fails if execution fails, or if it took more PAS than the claim pays (none for a pallet asset), and then the whole claim reverts. | `PayoutFailed` |
+
+The message binds the recipient, the asset and the amount, and a claim pays an alias once per
+epoch, so a proof pays exactly once: a copied proof can only fail. A product that pays the same
+sum to a fresh address each time, such as a deposit address per request, never repeats a claim.
+
 ### Context and message
 
 The context is the one a host derives for the product proof context
@@ -219,6 +251,20 @@ For contract `0x5FbDB2315678afecb367f032d93F642f64180aa3`, epoch 20743 and recip
 0000000000005107 d43593c715fdd31c61141abd04a99fd6822c8558854ccde39a5684e7a56da27d
 ```
 
+A claim's message is 109 bytes, returned by `claimMessageFor(epoch, recipient, asset, amount)`:
+
+| Bytes | Field | Encoding |
+|---|---|---|
+| 21 | `CLAIM_DOMAIN` | ASCII `paseo-faucet:claim:v1` |
+| 20 | the contract's address | |
+| 8 | chain id | u64 big-endian |
+| 8 | epoch | u64 big-endian |
+| 32 | recipient | `AccountId32` |
+| 4 | asset | u32 big-endian, 0 for PAS |
+| 16 | amount | u128 big-endian, the token's base units |
+
+The two domains differ, so a `drip` proof never satisfies `claim` and the reverse.
+
 The proof is the SCALE `BoundedVec<u8>` form: the compact length prefix, then the raw proof.
 Hosts return 785 raw bytes, so the argument is `0x450c` followed by those bytes, 787 bytes in
 all. The contract forwards it unchanged; without the prefix the precompile returns false and
@@ -240,6 +286,11 @@ the claim reverts `InvalidProof`.
 | `Paused`, `Unpaused` | `account` | `pause`, `unpause` |
 | `PauserUpdated` | `newPauser` | `setPauser` |
 | `Withdrawn` | `to` (indexed, the owner), `pas`, `pusd` | `withdraw` |
+| `Claimed` | `epoch` (indexed), `tier`, `contextAlias`, `recipient` (indexed), `asset` (indexed), `amount` | `claim` |
+| `ClaimAssetSet` | `asset` (indexed), `config` | `setClaimAsset` |
+| `ClaimAllowanceSet` | `tier` (indexed), `asset` (indexed), `amount` | `setClaimAllowance` |
+| `ClaimCapUpdated` | `maxClaimsPerEpoch` | `setMaxClaimsPerEpoch` |
+| `AssetWithdrawn` | `to` (indexed, the owner), `asset` (indexed), `amount` | `withdrawAsset` |
 | `OwnershipTransferStarted` | `previousOwner`, `newOwner` (both indexed) | `transferOwnership` |
 | `OwnershipTransferred` | `previousOwner`, `newOwner` (both indexed) | constructor, `acceptOwnership` |
 
@@ -247,21 +298,24 @@ the claim reverts `InvalidProof`.
 
 | Error | Selector | Raised when |
 |---|---|---|
-| `FaucetPaused` | `0xdbaf6b0e` | `drip` or `request` while paused |
+| `FaucetPaused` | `0xdbaf6b0e` | `drip`, `request` or `claim` while paused |
 | `TierDisabled` | `0x94d366b5` | the tier is disabled; always for `Tier.None` |
 | `UnknownDestination` | `0xf6ece5d8` | the id is not registered (`disableDestination`, `removeDestination`), or not registered and enabled (`request`) |
-| `EpochCapReached` | `0x3f2b1511` | the epoch cap is reached; a cap of 0 blocks every claim |
-| `AlreadyClaimed` | `0x646cf558` | every enabled destination has paid the alias in this tier and epoch |
+| `EpochCapReached` | `0x3f2b1511` | the epoch cap of `drip` or of `claim` is reached; a cap of 0 blocks every drip or claim |
+| `AlreadyClaimed` | `0x646cf558` | every enabled destination has paid the alias in this tier and epoch; or `claim` of a recipient, asset and amount already paid to the alias this epoch |
 | `NothingToPay` | `0x4d63c252` | no destination is due, or none that is due can be funded (rules 4 and 5) |
 | `InvalidProof` | `0x09bde339` | the precompile rejected the proof |
-| `PayoutFailed` | `0x3b1ab104` | a claim paid no destination; inside `payLeg` or `request`, XCM execution failed or the payout took more than allowed; a `withdraw` transfer failed |
+| `PayoutFailed` | `0x3b1ab104` | a drip paid no destination; inside `payLeg`, `request` or `claim`, XCM execution failed or the payout took more than allowed; a `withdraw` or `withdrawAsset` transfer failed, or `withdrawAsset` was called for PAS |
 | `NotOwner` | `0x30cd7471` | an owner-only call by anyone else; `acceptOwnership` by anyone but the pending owner |
 | `NotPauser` | `0x492f6781` | `pause` or `disableDestination` by neither the owner nor the pauser |
 | `NotSelf` | `0x29c3b7ee` | `payLeg` called by anyone but the faucet |
-| `InvalidConfig` | `0x35be3ac8` | an invalid constructor argument, `setTier(None, …)`, a destination entry that fails validation, a 257th destination id, or an allowance of pUSD without PAS |
+| `InvalidConfig` | `0x35be3ac8` | an invalid constructor argument, `setTier(None, …)`, `setClaimAllowance(None, …)`, an enabled claim asset with a zero `maxClaim`, a destination entry that fails validation, a 257th destination id, or an allowance of pUSD without PAS |
 | `NotWhitelisted` | `0x584a7938` | `request` by an account with no allowance |
 | `InvalidRequest` | `0x41abc801` | `request` amounts the destination does not take (rule 4) |
-| `AllowanceExceeded` | `0xc45cb513` | `request` beyond what is left of the caller's allowance this epoch |
+| `AllowanceExceeded` | `0xc45cb513` | `request` beyond what is left of the caller's allowance this epoch, or `claim` beyond what is left of the alias's allowance for the asset |
+| `UnknownAsset` | `0xc97d95cf` | `claim` of a token that is not listed or is disabled |
+| `ClaimTooLarge` | `0xa77cefcd` | `claim` of zero or of more than the asset's `maxClaim` |
+| `InsufficientFunds` | `0x356680b7` | `claim` of more than the faucet holds of the asset |
 
 ## Destinations and XCM programs
 
@@ -297,7 +351,7 @@ executes XCM bytes supplied by the owner or a caller.
 
 ### Launch set
 
-The entries come from `launch()` in `contracts/script/Deploy.s.sol`.
+The entries come from `launch()` in `contracts/script/Launch.sol`, which `Deploy.s.sol` inherits.
 
 | id | Chain | PAS / pUSD | `remoteFee` | `maxDeliveryFee` | `minPas` | `minPusd` |
 |---|---|---|---|---|---|---|
@@ -401,7 +455,8 @@ contracts/                      Foundry project; forge-std is a git submodule in
   src/PaseoFaucet.sol           the faucet
   src/XcmProgram.sol            SCALE encoder for the XCM v5 payout programs
   src/interfaces/               IPersonhood, ISystem and IXcm copied from their pinned sources; a minimal IERC20
-  script/Deploy.s.sol           deploys, configures and proposes the owner; launch() holds the launch entries
+  script/Launch.sol             launch(), the launch entries; apart from Deploy so the fork check can read them on chain
+  script/Deploy.s.sol           deploys, configures and proposes the owner
   script/Configure.s.sol        brings a deployed faucet's destinations in line with launch()
   test/                         unit tests with the precompiles mocked at their addresses, golden XCM vectors, a deploy test
   test/harness/FaucetHarness.sol  test-only subclass with owner-only pay() and dripWithoutProof(); for the fork check, never for real funds
@@ -474,7 +529,7 @@ the Asset Hub fork and asserts:
    the delivery and execution fees, asserts `remoteFee` and `maxDeliveryFee` are at least 10
    times them, and shows the delivery bound passes at the measured fee and reverts
    `PayoutFailed` one planck below it.
-5. **Launch entries.** `Deploy.launch()` is read on the fork, and each entry's `minPas` and
+5. **Launch entries.** `Launch.launch()` is read on the fork, and each entry's `minPas` and
    `minPusd` are checked against the destination's existential deposit and pUSD minimum.
 6. **One claim, every destination** (REQ-18). A claim through `dripWithoutProof` pays Asset Hub
    and People in one transaction. With People's `maxDeliveryFee` set below its delivery fee,
@@ -769,7 +824,7 @@ pUSD below its `minPusd`, 0 included, pays it PAS only.
    live state, as `fork/check.ts` does for People, and check that a drip is credited with
    nothing trapped, the measured fees, `minPas` = existential deposit + `remoteFee`, and
    `minPusd`. Keep `remoteFee` and `maxDeliveryFee` at least 10 times the measured fees.
-3. Add the entry to `launch()` in `contracts/script/Deploy.s.sol`.
+3. Add the entry to `launch()` in `contracts/script/Launch.sol`.
 4. Register it on the canary deployment and make a canary claim that arrives.
 5. Register it on production: once the change is on `main`, run the **Configure contract**
    workflow. By hand, the owner sends:

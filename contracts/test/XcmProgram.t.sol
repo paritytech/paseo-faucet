@@ -24,6 +24,26 @@ contract XcmProgramTest is Test {
         );
     }
 
+    function test_depositOne_pasIsTheDepositOfPasOnly() public pure {
+        assertEq(XcmProgram.depositOne(RECIPIENT, XcmProgram.NATIVE, PAS), XcmProgram.deposit(RECIPIENT, PAS, 0));
+    }
+
+    function test_depositOne_pusd() public pure {
+        assertEq(
+            XcmProgram.depositOne(RECIPIENT, 50_000_413, PUSD),
+            hex"050800040002043205" hex"76c8eb0b" hex"0002e1f505" hex"0d01020400010100"
+            hex"d43593c715fdd31c61141abd04a99fd6822c8558854ccde39a5684e7a56da27d"
+        );
+    }
+
+    function test_depositOne_usdt() public pure {
+        assertEq(
+            XcmProgram.depositOne(RECIPIENT, 1984, 5e6),
+            hex"050800040002043205" hex"011f" hex"00022d3101" hex"0d01020400010100"
+            hex"d43593c715fdd31c61141abd04a99fd6822c8558854ccde39a5684e7a56da27d"
+        );
+    }
+
     function test_transfer_peopleTeleportsPasAndPusd() public pure {
         assertEq(
             XcmProgram.transfer(1004, Transfer.Teleport, Transfer.Teleport, REMOTE_FEE, RECIPIENT, PAS, PUSD),
