@@ -26,7 +26,7 @@ const FAUCET_GAME_BASE: u32 = 0x8000_0000;
 const MAX_ROUNDS: u32 = 3;
 const MAX_GROUP_SIZE: u32 = 6;
 const SLOTS_PER_GAME: u32 = MAX_ROUNDS * MAX_GROUP_SIZE;
-const ATTESTER: [u8; 32] = *b"dim2fct\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0";
+const ATTESTER_TAG: &[u8; 7] = b"dim2fct";
 
 const XCM_VERSION_5: u8 = 5;
 const WITHDRAW_ASSET: u8 = 0;
@@ -95,6 +95,15 @@ struct Slot {
 }
 
 impl Slot {
+    fn attester(&self) -> [u8; 32] {
+        let mut attester = [0u8; 32];
+        attester[..ATTESTER_TAG.len()].copy_from_slice(ATTESTER_TAG);
+        attester[8..12].copy_from_slice(&self.game_index.to_le_bytes());
+        attester[12] = self.round;
+        attester[13] = self.attester_position as u8;
+        attester
+    }
+
     fn nth(granted: u32) -> Self {
         let slot = granted % SLOTS_PER_GAME;
         Self {
@@ -129,7 +138,7 @@ fn grant_call(sudo_key: &[u8; 32], claimant: &[u8; 32], slot: &Slot) -> Writer<1
     call.push(&[SUDO_PALLET, SUDO_SUDO_CALL]);
     call.push(&[NFT_CREDITS_PALLET, NFT_CREDITS_GRANT_CALL]);
     account_or_person(&mut call, claimant);
-    account_or_person(&mut call, &ATTESTER);
+    account_or_person(&mut call, &slot.attester());
     call.push(&slot.game_index.to_le_bytes());
     call.byte(slot.round);
     call.push(&slot.attester_position.to_le_bytes());
@@ -236,10 +245,17 @@ fn granted(claimant: &[u8; 32]) -> u32 {
     }
 }
 
+fn require_input(len: usize) {
+    if api::call_data_size() != len as u64 {
+        api::return_value(ReturnFlags::REVERT, &[]);
+    }
+}
+
 #[no_mangle]
 #[polkavm_derive::polkavm_export]
 pub extern "C" fn deploy() {
     let mut key = [0u8; 32];
+    require_input(key.len());
     api::call_data_copy(&mut key, 0);
     api::set_immutable_data(&key);
 }
@@ -248,6 +264,7 @@ pub extern "C" fn deploy() {
 #[polkavm_derive::polkavm_export]
 pub extern "C" fn call() {
     let mut input = [0u8; 36];
+    require_input(input.len());
     api::call_data_copy(&mut input, 0);
     let selector: [u8; 4] = input[..4].try_into().unwrap();
     let claimant: [u8; 32] = input[4..].try_into().unwrap();

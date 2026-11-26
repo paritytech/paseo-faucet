@@ -571,14 +571,17 @@ on People, as the `/nft-credits` page of the sudo app does with the sudo key. Th
 builds the whole XCM program on chain from the claimant alone: a teleport of the fee to People,
 `AliasOrigin` to the account of the contract, and `Transact` of
 `Proxy.proxy(sudo key, Sudo.sudo(NftCredits.testnet_grant_nft_claim_credit))`. Each grant takes
-the next credit slot of the claimant. The spike forks the next Asset Hub and People, deploys the
-contract with the sudo key as its constructor input, and checks that `program(bytes32)` returns
-the bytes the runtime codecs encode. It grants before and after the sudo key adds the contract
-as an `Any` proxy. Only the second grant awards a credit. `grant` has no caller check, so the
-contract must never be deployed, or added as a proxy, outside a fork. The script builds the
-contract with Rust 1.91 and `rust-src`, and links it with `pvm/link-revive`, which calls
-`polkavm-linker` 0.35, the PolkaVM version of the next Asset Hub runtime, for the `revive_v1`
-instruction set that the runtime requires and `polkatool` does not offer.
+the next credit slot of the claimant, with an attester of its own, so that no two credits share
+a hash. The spike forks the next Asset Hub and People, deploys the contract with the sudo key as
+its constructor input, and checks that `program(bytes32)` returns the bytes the runtime codecs
+encode. It grants before and after the sudo key adds the contract as an `Any` proxy. Only the
+grants after it award credits. It then sends the credit trees to Asset Hub with
+`replay_credit_trees` when they have not arrived, mints two credits of one round into collection
+18 as two pieces, and grants on into the next round and the next faucet game. `grant` has no
+caller check, so the contract must never be deployed, or added as a proxy, outside a fork. The
+script builds the contract with Rust 1.91 and `rust-src`, and links it with `pvm/link-revive`,
+which calls `polkavm-linker` 0.35, the PolkaVM version of the next Asset Hub runtime, for the
+`revive_v1` instruction set that the runtime requires and `polkatool` does not offer.
 
 [`docs/evidence/proof-spike.json`](docs/evidence/proof-spike.json) records a separate one-off
 run of `drip` against the real `IPersonhood`, with ring proofs built by a separate tool over
