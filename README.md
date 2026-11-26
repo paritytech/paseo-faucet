@@ -562,6 +562,14 @@ fork the latest block. It prints `FORK CHECK OK` and rewrites
 failed assertion. `npm run fork` starts the same two forks for manual use, and
 `npm run typecheck` checks the TypeScript.
 
+`npm run spike:nft-credits` checks whether a contract on Asset Hub can grant an NFT claim credit
+on People, as the `/nft-credits` page of the sudo app does with the sudo key. It forks the next
+Asset Hub and People, deploys `XcmForwarder`, and sends one program from it: a teleport of the
+fee to People, `AliasOrigin` to the contract's own account, and `Transact` of
+`Proxy.proxy(sudo key, Sudo.sudo(NftCredits.testnet_grant_nft_claim_credit))`. It runs the
+program before and after the sudo key adds the contract as an `Any` proxy. Only the second run
+awards the credit.
+
 [`docs/evidence/proof-spike.json`](docs/evidence/proof-spike.json) records a separate one-off
 run of `drip` against the real `IPersonhood`, with ring proofs built by a separate tool over
 one-member rings written into the fork. It ran against the previous contract, which paid one
